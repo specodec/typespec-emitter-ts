@@ -10,10 +10,16 @@ import {
   Program,
   Type,
   Scalar,
+  Diagnostic,
 } from "@typespec/compiler";
+import {
+  checkReservedKeyword,
+  formatReservedError,
+} from "@specodec/typespec-specodec-core";
 
 export type EmitterOptions = {
   "emitter-output-dir": string;
+  "ignore-reserved-keywords"?: boolean;
 };
 
 interface FieldInfo {
@@ -24,7 +30,7 @@ interface FieldInfo {
 
 interface ServiceInfo {
   namespace: Namespace;
-  iface: Interface;
+  iface?: Interface;
   serviceName: string;
   models: Model[];
 }
@@ -56,6 +62,7 @@ function typeToTs(type: Type): string {
   return "unknown";
 }
 
+// Write a value of given type to `w`. For nested models, calls _writeJsonInto / _writeMsgPackInto.
 function writeJsonExpr(type: Type, varExpr: string): string {
   const n = scalarName(type);
   if (n === "string") return `w.writeString(${varExpr})`;
@@ -72,7 +79,7 @@ function writeJsonExpr(type: Type, varExpr: string): string {
     const elemTs = typeToTs(elem);
     return `(() => { w.beginArray(${varExpr}.length); for (const _e of ${varExpr}) { w.nextElement(); ${writeJsonExpr(elem, "_e")}; } w.endArray(); })()`;
   }
-  if (type.kind === "Model" && type.name) return `${type.name}Codec.writeJson(w, ${varExpr})`;
+  if (type.kind === "Model" && type.name) return `_writeJson${type.name}(w, ${varExpr})`;
   return `w.writeString(String(${varExpr}))`;
 }
 
@@ -91,11 +98,11 @@ function writeMsgPackExpr(type: Type, varExpr: string): string {
     const elem = (type as Model).indexer!.value;
     return `(() => { w.beginArray(${varExpr}.length); for (const _e of ${varExpr}) { w.nextElement(); ${writeMsgPackExpr(elem, "_e")}; } w.endArray(); })()`;
   }
-  if (type.kind === "Model" && type.name) return `${type.name}Codec.writeMsgPack(w, ${varExpr})`;
+  if (type.kind === "Model" && type.name) return `_writeMsgPack${type.name}(w, ${varExpr})`;
   return `w.writeString(String(${varExpr}))`;
 }
 
-function readJsonExpr(type: Type): string {
+function readExpr(type: Type): string {
   const n = scalarName(type);
   if (n === "string") return `r.readString()`;
   if (n === "boolean") return `r.readBool()`;
@@ -109,25 +116,95 @@ function readJsonExpr(type: Type): string {
   if (type.kind === "Model" && (type as Model).indexer) {
     const elem = (type as Model).indexer!.value;
     const elemTs = typeToTs(elem);
-    return `(() => { const _a: ${elemTs}[] = []; r.beginArray(); while (r.hasNextElement()) { _a.push(${readJsonExpr(elem)}); } r.endArray(); return _a; })()`;
+    return `(() => { const _a: ${elemTs}[] = []; r.beginArray(); while (r.hasNextElement()) { _a.push(${readExpr(elem)}); } r.endArray(); return _a; })()`;
   }
-  if (type.kind === "Model" && type.name) return `${type.name}Codec.decode(r)`;
+  if (type.kind === "Model" && type.name) return `_decode${type.name}(r)`;
   return `r.readString()`;
+}
+
+// Count non-optional fields for MsgPack beginObject
+function countRequired(fields: FieldInfo[]): number {
+  return fields.filter(f => !f.optional).length;
+}
+
+function emitModelFunctions(m: Model, L: string[]): void {
+  if (!m.name) return;
+  const fields = extractFields(m);
+  const required = fields.filter(f => !f.optional);
+  const optional = fields.filter(f => f.optional);
+
+  // _writeJson${Name}(w, obj)
+  L.push(`function _writeJson${m.name}(w: JsonWriter, obj: ${m.name}): void {`);
+  L.push(`  w.beginObject();`);
+  for (const f of fields) {
+    if (f.optional) {
+      L.push(`  if (obj.${f.name} !== undefined) { w.writeField("${f.name}"); ${writeJsonExpr(f.type, `obj.${f.name}`)}; }`);
+    } else {
+      L.push(`  w.writeField("${f.name}"); ${writeJsonExpr(f.type, `obj.${f.name}`)};`);
+    }
+  }
+  L.push(`  w.endObject();`);
+  L.push(`}`);
+  L.push("");
+
+  // _writeMsgPack${Name}(w, obj)
+  L.push(`function _writeMsgPack${m.name}(w: MsgPackWriter, obj: ${m.name}): void {`);
+  if (optional.length === 0) {
+    L.push(`  w.beginObject(${fields.length});`);
+  } else {
+    L.push(`  let _n = ${required.length};`);
+    for (const f of optional) {
+      L.push(`  if (obj.${f.name} !== undefined) _n++;`);
+    }
+    L.push(`  w.beginObject(_n);`);
+  }
+  for (const f of fields) {
+    if (f.optional) {
+      L.push(`  if (obj.${f.name} !== undefined) { w.writeField("${f.name}"); ${writeMsgPackExpr(f.type, `obj.${f.name}`)}; }`);
+    } else {
+      L.push(`  w.writeField("${f.name}"); ${writeMsgPackExpr(f.type, `obj.${f.name}`)};`);
+    }
+  }
+  L.push(`  w.endObject();`);
+  L.push(`}`);
+  L.push("");
+
+  // _decode${Name}(r)
+  L.push(`function _decode${m.name}(r: SpecReader): ${m.name} {`);
+  L.push(`  const obj: Partial<${m.name}> = {};`);
+  L.push(`  r.beginObject();`);
+  L.push(`  while (r.hasNextField()) {`);
+  L.push(`    switch (r.readFieldName()) {`);
+  for (const f of fields) {
+    L.push(`      case "${f.name}": obj.${f.name} = ${readExpr(f.type)}; break;`);
+  }
+  L.push(`      default: r.skip();`);
+  L.push(`    }`);
+  L.push(`  }`);
+  L.push(`  r.endObject();`);
+  L.push(`  return obj as ${m.name};`);
+  L.push(`}`);
+  L.push("");
 }
 
 function collectServices(program: Program): ServiceInfo[] {
   const services = listServices(program);
   const result: ServiceInfo[] = [];
-  function collectFromNs(ns: Namespace) {
-    for (const [, iface] of ns.interfaces) {
-      const models: Model[] = [];
-      const seen = new Set<string>();
-      navigateTypesInNamespace(ns, {
-        model: (m: Model) => {
-          if (m.name && !seen.has(m.name)) { models.push(m); seen.add(m.name); }
-        },
+  function collectFromNs(ns: Namespace, iface?: Interface) {
+    const models: Model[] = [];
+    const seen = new Set<string>();
+    navigateTypesInNamespace(ns, {
+      model: (m: Model) => {
+        if (m.name && !seen.has(m.name)) { models.push(m); seen.add(m.name); }
+      },
+    });
+    if (models.length > 0) {
+      result.push({ 
+        namespace: ns, 
+        iface: iface || { name: ns.name || "TestService", namespace: ns } as Interface, 
+        serviceName: iface?.name || ns.name || "TestService", 
+        models 
       });
-      result.push({ namespace: ns, iface, serviceName: iface.name, models });
     }
   }
   for (const svc of services) collectFromNs(svc.type);
@@ -142,7 +219,39 @@ function collectServices(program: Program): ServiceInfo[] {
 export async function $onEmit(context: EmitContext<EmitterOptions>) {
   const program = context.program;
   const outputDir = context.emitterOutputDir;
+  const ignoreReservedKeywords = context.options["ignore-reserved-keywords"] ?? false;
   const services = collectServices(program);
+
+  const reservedFieldErrors: Diagnostic[] = [];
+  for (const svc of services) {
+    for (const m of svc.models) {
+      if (!m.name) continue;
+      for (const [fieldName, prop] of m.properties) {
+        const reservedIn = checkReservedKeyword(fieldName);
+        if (reservedIn.length > 0) {
+          const message = formatReservedError(fieldName, m.name, reservedIn);
+          const diag: Diagnostic = {
+            severity: "error",
+            code: "reserved-keyword",
+            message,
+            target: prop,
+          };
+          reservedFieldErrors.push(diag);
+        }
+      }
+    }
+  }
+
+  if (reservedFieldErrors.length > 0 && !ignoreReservedKeywords) {
+    program.reportDiagnostics(reservedFieldErrors);
+    return;
+  }
+
+  if (reservedFieldErrors.length > 0 && ignoreReservedKeywords) {
+    for (const diag of reservedFieldErrors) {
+      console.warn(`Warning: ${diag.message}`);
+    }
+  }
 
   for (const svc of services) {
     const L: string[] = [];
@@ -151,83 +260,88 @@ export async function $onEmit(context: EmitContext<EmitterOptions>) {
     L.push(`import { JsonWriter, MsgPackWriter } from "@specodec/specodec-ts";`);
     L.push("");
 
+    // 1. Interfaces (types only)
     for (const m of svc.models) {
       if (!m.name) continue;
       const fields = extractFields(m);
-
-      // interface
       L.push(`export interface ${m.name} {`);
       for (const f of fields) {
         L.push(`  ${f.name}${f.optional ? "?" : ""}: ${typeToTs(f.type)};`);
       }
       L.push("}");
       L.push("");
+    }
 
-      // codec object
+    // 2. Internal write/decode helpers
+    for (const m of svc.models) {
+      emitModelFunctions(m, L);
+    }
+
+    // 3. Exported SpecCodec objects
+    for (const m of svc.models) {
+      if (!m.name) continue;
       L.push(`export const ${m.name}Codec: SpecCodec<${m.name}> = {`);
-
-      // encodeJson
       L.push(`  encodeJson(obj: ${m.name}): Uint8Array {`);
       L.push(`    const w = new JsonWriter();`);
-      L.push(`    w.beginObject();`);
-      for (const f of fields) {
-        if (f.optional) {
-          L.push(`    if (obj.${f.name} !== undefined) { w.writeField("${f.name}"); ${writeJsonExpr(f.type, `obj.${f.name}`)}; }`);
-        } else {
-          L.push(`    w.writeField("${f.name}"); ${writeJsonExpr(f.type, `obj.${f.name}`)};`);
-        }
-      }
-      L.push(`    w.endObject();`);
+      L.push(`    _writeJson${m.name}(w, obj);`);
       L.push(`    return w.toBytes();`);
       L.push(`  },`);
-
-      // encodeMsgPack
       L.push(`  encodeMsgPack(obj: ${m.name}): Uint8Array {`);
-      const required = fields.filter(f => !f.optional);
-      const optional = fields.filter(f => f.optional);
-      if (optional.length === 0) {
-        L.push(`    const w = new MsgPackWriter();`);
-        L.push(`    w.beginObject(${fields.length});`);
-      } else {
-        L.push(`    let _n = ${required.length};`);
-        for (const f of optional) {
-          L.push(`    if (obj.${f.name} !== undefined) _n++;`);
-        }
-        L.push(`    const w = new MsgPackWriter();`);
-        L.push(`    w.beginObject(_n);`);
-      }
-      for (const f of fields) {
-        if (f.optional) {
-          L.push(`    if (obj.${f.name} !== undefined) { w.writeField("${f.name}"); ${writeMsgPackExpr(f.type, `obj.${f.name}`)}; }`);
-        } else {
-          L.push(`    w.writeField("${f.name}"); ${writeMsgPackExpr(f.type, `obj.${f.name}`)};`);
-        }
-      }
-      L.push(`    w.endObject();`);
+      L.push(`    const w = new MsgPackWriter();`);
+      L.push(`    _writeMsgPack${m.name}(w, obj);`);
       L.push(`    return w.toBytes();`);
       L.push(`  },`);
-
-      // decode (shared for JSON + MsgPack)
-      L.push(`  decode(r: SpecReader): ${m.name} {`);
-      L.push(`    const obj: Partial<${m.name}> = {};`);
-      L.push(`    r.beginObject();`);
-      L.push(`    while (r.hasNextField()) {`);
-      L.push(`      switch (r.readFieldName()) {`);
-      for (const f of fields) {
-        L.push(`        case "${f.name}": obj.${f.name} = ${readJsonExpr(f.type)}; break;`);
-      }
-      L.push(`        default: r.skip();`);
-      L.push(`      }`);
-      L.push(`    }`);
-      L.push(`    r.endObject();`);
-      L.push(`    return obj as ${m.name};`);
-      L.push(`  },`);
-
+      L.push(`  decode(r: SpecReader): ${m.name} { return _decode${m.name}(r); },`);
       L.push(`};`);
       L.push("");
     }
 
-    const fileName = svc.serviceName.replace(/([A-Z])/g, (m, c, i) => (i ? "-" : "") + c.toLowerCase());
+    const snake = (s: string) => s.replace(/([A-Z])/g, (m, c, i) => (i ? "-" : "") + c.toLowerCase());
+    const fileName = snake(svc.serviceName);
     await emitFile(program, { path: `${outputDir}/${fileName}.types.ts`, content: L.join("\n") });
+    
+    // Also output models.json manifest for test generator
+    const allModels: any = {};
+    const SUB_MODELS = ['Inner', 'Coord', 'IdVal', 'Label', 'Money', 'Range32', 'Addr', 'Point3'];
+    
+    for (const m of svc.models) {
+      if (!m.name) continue;
+      const fields = extractFields(m);
+      const fieldDefs = fields.map(f => {
+        const scalar = scalarName(f.type);
+        let t = scalar;
+        let isArray = false;
+        let isModel = false;
+        
+        if (!t && f.type.kind === 'Model') {
+          const mt = f.type as Model;
+          if (mt.indexer) {
+            isArray = true;
+            const elem = mt.indexer.value;
+            t = scalarName(elem) || (elem.kind === 'Model' && elem.name ? elem.name : 'unknown');
+            isModel = elem.kind === 'Model' && !!elem.name;
+          } else if (mt.name) {
+            t = mt.name;
+            isModel = true;
+          }
+        }
+        
+        return {
+          name: f.name,
+          type: t || 'unknown',
+          optional: f.optional,
+          isArray,
+          isModel
+        };
+      });
+      allModels[m.name] = { name: m.name, fields: fieldDefs };
+    }
+    
+    const manifest = {
+      models: allModels,
+      testModels: svc.models.filter(m => m.name && !SUB_MODELS.includes(m.name)).map(m => m.name)
+    };
+    
+    await emitFile(program, { path: `${outputDir}/models.json`, content: JSON.stringify(manifest, null, 2) });
   }
 }
