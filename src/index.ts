@@ -57,13 +57,21 @@ function typeToTs(type: Type): string {
   if (n === "bytes") return "Uint8Array";
   if (type.kind === "Intrinsic" && (type as any).name === "string") return "string";
   if (type.kind === "Intrinsic" && (type as any).name === "boolean") return "boolean";
-  if (type.kind === "Model" && (type as Model).indexer) return `${typeToTs((type as Model).indexer!.value)}[]`;
+  if (type.kind === "Model" && (type as Model).indexer) {
+    const indexer = (type as Model).indexer!;
+    const keyName = (indexer.key as any).name;
+    if (keyName === "integer") {
+      return `${typeToTs(indexer.value)}[]`;
+    } else if (keyName === "string") {
+      return `Record<string, ${typeToTs(indexer.value)}>`;
+    }
+  }
   if (type.kind === "Model") return type.name || "unknown";
   return "unknown";
 }
 
-// Write a value of given type to `w`. For nested models, calls _writeJsonInto / _writeMsgPackInto.
-function writeJsonExpr(type: Type, varExpr: string): string {
+// Write a value of given type to `w` (SpecWriter — format-agnostic).
+function writeExpr(type: Type, varExpr: string): string {
   const n = scalarName(type);
   if (n === "string") return `w.writeString(${varExpr})`;
   if (n === "boolean") return `w.writeBool(${varExpr})`;
@@ -75,34 +83,21 @@ function writeJsonExpr(type: Type, varExpr: string): string {
   if (n === "float64" || n === "float" || n === "decimal") return `w.writeFloat64(${varExpr})`;
   if (n === "bytes") return `w.writeBytes(${varExpr})`;
   if (type.kind === "Model" && (type as Model).indexer) {
-    const elem = (type as Model).indexer!.value;
-    const elemTs = typeToTs(elem);
-    return `(() => { w.beginArray(${varExpr}.length); for (const _e of ${varExpr}) { w.nextElement(); ${writeJsonExpr(elem, "_e")}; } w.endArray(); })()`;
+    const indexer = (type as Model).indexer!;
+    const keyName = (indexer.key as any).name;
+    if (keyName === "integer") {
+      const elem = indexer.value;
+      return `(() => { w.beginArray(${varExpr}.length); for (const _e of ${varExpr}) { w.nextElement(); ${writeExpr(elem, "_e")}; } w.endArray(); })()`;
+    } else if (keyName === "string") {
+      const elem = indexer.value;
+      return `(() => { w.beginObject(Object.keys(${varExpr}).length); for (const [_k, _v] of Object.entries(${varExpr})) { w.writeField(_k); ${writeExpr(elem, "_v")}; } w.endObject(); })()`;
+    }
   }
-  if (type.kind === "Model" && type.name) return `_writeJson${type.name}(w, ${varExpr})`;
+  if (type.kind === "Model" && type.name) return `_write${type.name}(w, ${varExpr})`;
   return `w.writeString(String(${varExpr}))`;
 }
 
-function writeMsgPackExpr(type: Type, varExpr: string): string {
-  const n = scalarName(type);
-  if (n === "string") return `w.writeString(${varExpr})`;
-  if (n === "boolean") return `w.writeBool(${varExpr})`;
-  if (n === "int32" || n === "int8" || n === "int16" || n === "integer") return `w.writeInt32(${varExpr})`;
-  if (n === "int64") return `w.writeInt64(${varExpr})`;
-  if (n === "uint32" || n === "uint8" || n === "uint16") return `w.writeUint32(${varExpr})`;
-  if (n === "uint64") return `w.writeUint64(${varExpr})`;
-  if (n === "float32") return `w.writeFloat32(${varExpr})`;
-  if (n === "float64" || n === "float" || n === "decimal") return `w.writeFloat64(${varExpr})`;
-  if (n === "bytes") return `w.writeBytes(${varExpr})`;
-  if (type.kind === "Model" && (type as Model).indexer) {
-    const elem = (type as Model).indexer!.value;
-    return `(() => { w.beginArray(${varExpr}.length); for (const _e of ${varExpr}) { w.nextElement(); ${writeMsgPackExpr(elem, "_e")}; } w.endArray(); })()`;
-  }
-  if (type.kind === "Model" && type.name) return `_writeMsgPack${type.name}(w, ${varExpr})`;
-  return `w.writeString(String(${varExpr}))`;
-}
-
-function readExpr(type: Type): string {
+function readExpr(type: Type, optional?: boolean): string {
   const n = scalarName(type);
   if (n === "string") return `r.readString()`;
   if (n === "boolean") return `r.readBool()`;
@@ -114,17 +109,25 @@ function readExpr(type: Type): string {
   if (n === "float64" || n === "float" || n === "decimal") return `r.readFloat64()`;
   if (n === "bytes") return `r.readBytes()`;
   if (type.kind === "Model" && (type as Model).indexer) {
-    const elem = (type as Model).indexer!.value;
-    const elemTs = typeToTs(elem);
-    return `(() => { const _a: ${elemTs}[] = []; r.beginArray(); while (r.hasNextElement()) { _a.push(${readExpr(elem)}); } r.endArray(); return _a; })()`;
+    const indexer = (type as Model).indexer!;
+    const keyName = (indexer.key as any).name;
+    if (keyName === "integer") {
+      const elem = indexer.value;
+      const elemTs = typeToTs(elem);
+      return `(() => { const _a: ${elemTs}[] = []; r.beginArray(); while (r.hasNextElement()) { _a.push(${readExpr(elem)}); } r.endArray(); return _a; })()`;
+    } else if (keyName === "string") {
+      const elem = indexer.value;
+      const elemTs = typeToTs(elem);
+      return `(() => { const _m: Record<string, ${elemTs}> = {}; r.beginObject(); while (r.hasNextField()) { const _k = r.readFieldName(); _m[_k] = ${readExpr(elem)}; } r.endObject(); return _m; })()`;
+    }
   }
-  if (type.kind === "Model" && type.name) return `_decode${type.name}(r)`;
+  if (type.kind === "Model" && type.name) {
+    if (optional) {
+      return `(r.isNull() ? r.readNull() : _decode${type.name}(r)) ?? undefined`;
+    }
+    return `_decode${type.name}(r)`;
+  }
   return `r.readString()`;
-}
-
-// Count non-optional fields for MsgPack beginObject
-function countRequired(fields: FieldInfo[]): number {
-  return fields.filter(f => !f.optional).length;
 }
 
 function emitModelFunctions(m: Model, L: string[]): void {
@@ -133,22 +136,8 @@ function emitModelFunctions(m: Model, L: string[]): void {
   const required = fields.filter(f => !f.optional);
   const optional = fields.filter(f => f.optional);
 
-  // _writeJson${Name}(w, obj)
-  L.push(`function _writeJson${m.name}(w: JsonWriter, obj: ${m.name}): void {`);
-  L.push(`  w.beginObject();`);
-  for (const f of fields) {
-    if (f.optional) {
-      L.push(`  if (obj.${f.name} !== undefined) { w.writeField("${f.name}"); ${writeJsonExpr(f.type, `obj.${f.name}`)}; }`);
-    } else {
-      L.push(`  w.writeField("${f.name}"); ${writeJsonExpr(f.type, `obj.${f.name}`)};`);
-    }
-  }
-  L.push(`  w.endObject();`);
-  L.push(`}`);
-  L.push("");
-
-  // _writeMsgPack${Name}(w, obj)
-  L.push(`function _writeMsgPack${m.name}(w: MsgPackWriter, obj: ${m.name}): void {`);
+  // _write${Name}(w, obj) — single format-agnostic write function
+  L.push(`function _write${m.name}(w: SpecWriter, obj: ${m.name}): void {`);
   if (optional.length === 0) {
     L.push(`  w.beginObject(${fields.length});`);
   } else {
@@ -160,9 +149,9 @@ function emitModelFunctions(m: Model, L: string[]): void {
   }
   for (const f of fields) {
     if (f.optional) {
-      L.push(`  if (obj.${f.name} !== undefined) { w.writeField("${f.name}"); ${writeMsgPackExpr(f.type, `obj.${f.name}`)}; }`);
+      L.push(`  if (obj.${f.name} !== undefined) { w.writeField("${f.name}"); ${writeExpr(f.type, `obj.${f.name}`)}; }`);
     } else {
-      L.push(`  w.writeField("${f.name}"); ${writeMsgPackExpr(f.type, `obj.${f.name}`)};`);
+      L.push(`  w.writeField("${f.name}"); ${writeExpr(f.type, `obj.${f.name}`)};`);
     }
   }
   L.push(`  w.endObject();`);
@@ -176,7 +165,7 @@ function emitModelFunctions(m: Model, L: string[]): void {
   L.push(`  while (r.hasNextField()) {`);
   L.push(`    switch (r.readFieldName()) {`);
   for (const f of fields) {
-    L.push(`      case "${f.name}": obj.${f.name} = ${readExpr(f.type)}; break;`);
+    L.push(`      case "${f.name}": obj.${f.name} = ${readExpr(f.type, f.optional)}; break;`);
   }
   L.push(`      default: r.skip();`);
   L.push(`    }`);
@@ -190,12 +179,26 @@ function emitModelFunctions(m: Model, L: string[]): void {
 function collectServices(program: Program): ServiceInfo[] {
   const services = listServices(program);
   const result: ServiceInfo[] = [];
+  
+  function isStdLibNamespace(ns: Namespace): boolean {
+    const fullName = getNamespaceFullName(ns);
+    return fullName === "TypeSpec" || fullName.startsWith("TypeSpec.");
+  }
+  
   function collectFromNs(ns: Namespace, iface?: Interface) {
+    if (isStdLibNamespace(ns)) return;
+    
     const models: Model[] = [];
     const seen = new Set<string>();
     navigateTypesInNamespace(ns, {
       model: (m: Model) => {
-        if (m.name && !seen.has(m.name)) { models.push(m); seen.add(m.name); }
+        if (m.name && !seen.has(m.name)) {
+          const modelNs = m.namespace;
+          if (modelNs && !isStdLibNamespace(modelNs)) {
+            models.push(m);
+            seen.add(m.name);
+          }
+        }
       },
     });
     if (models.length > 0) {
@@ -256,8 +259,7 @@ export async function $onEmit(context: EmitContext<EmitterOptions>) {
   for (const svc of services) {
     const L: string[] = [];
     L.push("// Generated by @specodec/typespec-specodec-ts. DO NOT EDIT.");
-    L.push(`import type { SpecReader, SpecCodec } from "@specodec/specodec-ts";`);
-    L.push(`import { JsonWriter, MsgPackWriter } from "@specodec/specodec-ts";`);
+    L.push(`import type { SpecReader, SpecWriter, SpecCodec } from "@specodec/specodec-ts";`);
     L.push("");
 
     // 1. Interfaces (types only)
@@ -281,16 +283,7 @@ export async function $onEmit(context: EmitContext<EmitterOptions>) {
     for (const m of svc.models) {
       if (!m.name) continue;
       L.push(`export const ${m.name}Codec: SpecCodec<${m.name}> = {`);
-      L.push(`  encodeJson(obj: ${m.name}): Uint8Array {`);
-      L.push(`    const w = new JsonWriter();`);
-      L.push(`    _writeJson${m.name}(w, obj);`);
-      L.push(`    return w.toBytes();`);
-      L.push(`  },`);
-      L.push(`  encodeMsgPack(obj: ${m.name}): Uint8Array {`);
-      L.push(`    const w = new MsgPackWriter();`);
-      L.push(`    _writeMsgPack${m.name}(w, obj);`);
-      L.push(`    return w.toBytes();`);
-      L.push(`  },`);
+      L.push(`  encode(w: SpecWriter, obj: ${m.name}): void { _write${m.name}(w, obj); },`);
       L.push(`  decode(r: SpecReader): ${m.name} { return _decode${m.name}(r); },`);
       L.push(`};`);
       L.push("");
@@ -311,15 +304,24 @@ export async function $onEmit(context: EmitContext<EmitterOptions>) {
         const scalar = scalarName(f.type);
         let t = scalar;
         let isArray = false;
+        let isRecord = false;
         let isModel = false;
         
         if (!t && f.type.kind === 'Model') {
           const mt = f.type as Model;
           if (mt.indexer) {
-            isArray = true;
-            const elem = mt.indexer.value;
-            t = scalarName(elem) || (elem.kind === 'Model' && elem.name ? elem.name : 'unknown');
-            isModel = elem.kind === 'Model' && !!elem.name;
+            const keyName = (mt.indexer.key as any).name;
+            if (keyName === 'integer') {
+              isArray = true;
+              const elem = mt.indexer.value;
+              t = scalarName(elem) || (elem.kind === 'Model' && elem.name ? elem.name : 'unknown');
+              isModel = elem.kind === 'Model' && !!elem.name;
+            } else if (keyName === 'string') {
+              isRecord = true;
+              const elem = mt.indexer.value;
+              t = scalarName(elem) || (elem.kind === 'Model' && elem.name ? elem.name : 'unknown');
+              isModel = elem.kind === 'Model' && !!elem.name;
+            }
           } else if (mt.name) {
             t = mt.name;
             isModel = true;
@@ -331,6 +333,7 @@ export async function $onEmit(context: EmitContext<EmitterOptions>) {
           type: t || 'unknown',
           optional: f.optional,
           isArray,
+          isRecord,
           isModel
         };
       });
