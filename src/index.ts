@@ -2,7 +2,6 @@ import {
   EmitContext,
   emitFile,
   listServices,
-  getNamespaceFullName,
   navigateTypesInNamespace,
   Model,
   Namespace,
@@ -15,7 +14,8 @@ import {
 import {
   checkReservedKeyword,
   formatReservedError,
-} from "@specodec/typespec-specodec-core";
+  isSpecodecModel,
+} from "@specodec/typespec-emitter-core";
 
 export type EmitterOptions = {
   "emitter-output-dir": string;
@@ -180,24 +180,14 @@ function collectServices(program: Program): ServiceInfo[] {
   const services = listServices(program);
   const result: ServiceInfo[] = [];
   
-  function isStdLibNamespace(ns: Namespace): boolean {
-    const fullName = getNamespaceFullName(ns);
-    return fullName === "TypeSpec" || fullName.startsWith("TypeSpec.");
-  }
-  
   function collectFromNs(ns: Namespace, iface?: Interface) {
-    if (isStdLibNamespace(ns)) return;
-    
     const models: Model[] = [];
     const seen = new Set<string>();
     navigateTypesInNamespace(ns, {
       model: (m: Model) => {
-        if (m.name && !seen.has(m.name)) {
-          const modelNs = m.namespace;
-          if (modelNs && !isStdLibNamespace(modelNs)) {
-            models.push(m);
-            seen.add(m.name);
-          }
+        if (m.name && !seen.has(m.name) && isSpecodecModel(program, m)) {
+          models.push(m);
+          seen.add(m.name);
         }
       },
     });

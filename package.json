@@ -1,18 +1,24 @@
 {
-  "name": "@specodec/typespec-specodec-ts",
+  "name": "@specodec/typespec-emitter-ts",
   "version": "0.0.1",
   "type": "module",
   "main": "dist/index.js",
   "typespec": {
     "emitter": true,
     "options": {
-      "@specodec/typespec-specodec-ts": {
+      "@specodec/typespec-emitter-ts": {
         "type": "object",
         "properties": {
-          "emitter-output-dir": { "type": "string" },
-          "ignore-reserved-keywords": { "type": "boolean" }
+          "emitter-output-dir": {
+            "type": "string"
+          },
+          "ignore-reserved-keywords": {
+            "type": "boolean"
+          }
         },
-        "required": ["emitter-output-dir"]
+        "required": [
+          "emitter-output-dir"
+        ]
       }
     }
   },
@@ -21,7 +27,7 @@
     "prepare": "npm run build"
   },
   "dependencies": {
-    "@specodec/typespec-specodec-core": "file:/tmp/specodec-typespec-specodec-core-0.0.1.tgz"
+    "@specodec/typespec-emitter-core": "^0.0.1"
   },
   "devDependencies": {
     "@typespec/compiler": "1.11.0",
