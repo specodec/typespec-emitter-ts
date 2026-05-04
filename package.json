@@ -1,12 +1,12 @@
 {
-  "name": "@specodec/typespec-emitter-ts",
-  "version": "0.1.0",
+  "name": "@specodec/typespec-emitter-typescript",
+  "version": "0.1.1",
   "type": "module",
   "main": "dist/index.js",
   "typespec": {
     "emitter": true,
     "options": {
-      "@specodec/typespec-emitter-ts": {
+      "@specodec/typespec-emitter-typescript": {
         "type": "object",
         "properties": {
           "emitter-output-dir": {
