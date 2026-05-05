@@ -47,13 +47,13 @@ function writeExpr(type: any, varExpr: string): string {
   if (n === "bytes") return `w.writeBytes(${varExpr})`;
   if (isArrayType(type)) {
     const elem = arrayElementType(type);
-    return `(() => { w.beginArray(${varExpr}.length); for (const _e of ${varExpr}) { w.nextElement(); ${writeExpr(elem, "_e")}; } w.endArray(); })()`;
+    return `(() => { w.beginArray(${varExpr}.length); for (const item of ${varExpr}) { w.nextElement(); ${writeExpr(elem, "item")}; } w.endArray(); })()`;
   }
   if (isRecordType(type)) {
     const elem = recordElementType(type);
-    return `(() => { w.beginObject(Object.keys(${varExpr}).length); for (const [_k, _v] of Object.entries(${varExpr})) { w.writeField(_k); ${writeExpr(elem, "_v")}; } w.endObject(); })()`;
+    return `(() => { w.beginObject(Object.keys(${varExpr}).length); for (const [key, val] of Object.entries(${varExpr})) { w.writeField(key); ${writeExpr(elem, "val")}; } w.endObject(); })()`;
   }
-  if (type.kind === "Model" && type.name) return `_write${type.name}(w, ${varExpr})`;
+  if (type.kind === "Model" && type.name) return `write${type.name}(w, ${varExpr})`;
   return `w.writeString(String(${varExpr}))`;
 }
 
@@ -71,16 +71,16 @@ function readExpr(type: any, optional?: boolean): string {
   if (isArrayType(type)) {
     const elem = arrayElementType(type);
     const elemTs = typeToTs(elem);
-    return `(() => { const _a: ${elemTs}[] = []; r.beginArray(); while (r.hasNextElement()) { _a.push(${readExpr(elem)}); } r.endArray(); return _a; })()`;
+    return `(() => { const arr: ${elemTs}[] = []; r.beginArray(); while (r.hasNextElement()) { arr.push(${readExpr(elem)}); } r.endArray(); return arr; })()`;
   }
   if (isRecordType(type)) {
     const elem = recordElementType(type);
     const elemTs = typeToTs(elem);
-    return `(() => { const _m: Record<string, ${elemTs}> = {}; r.beginObject(); while (r.hasNextField()) { const _k = r.readFieldName(); _m[_k] = ${readExpr(elem)}; } r.endObject(); return _m; })()`;
+    return `(() => { const record: Record<string, ${elemTs}> = {}; r.beginObject(); while (r.hasNextField()) { const key = r.readFieldName(); record[key] = ${readExpr(elem)}; } r.endObject(); return record; })()`;
   }
   if (type.kind === "Model" && type.name) {
-    if (optional) return `(r.isNull() ? r.readNull() : _decode${type.name}(r)) ?? undefined`;
-    return `_decode${type.name}(r)`;
+    if (optional) return `(r.isNull() ? r.readNull() : decode${type.name}(r)) ?? undefined`;
+    return `decode${type.name}(r)`;
   }
   return `r.readString()`;
 }
@@ -91,13 +91,13 @@ function emitModelFunctions(m: Model, L: string[]): void {
   const required = fields.filter(f => !f.optional);
   const optional = fields.filter(f => f.optional);
 
-  L.push(`function _write${m.name}(w: SpecWriter, obj: ${m.name}): void {`);
+  L.push(`function write${m.name}(w: SpecWriter, obj: ${m.name}): void {`);
   if (optional.length === 0) {
     L.push(`  w.beginObject(${fields.length});`);
   } else {
-    L.push(`  let _n = ${required.length};`);
-    for (const f of optional) L.push(`  if (obj.${f.name} !== undefined) _n++;`);
-    L.push(`  w.beginObject(_n);`);
+    L.push(`  let fieldCount = ${required.length};`);
+    for (const f of optional) L.push(`  if (obj.${f.name} !== undefined) fieldCount++;`);
+    L.push(`  w.beginObject(fieldCount);`);
   }
   for (const f of fields) {
     if (f.optional) {
@@ -110,7 +110,7 @@ function emitModelFunctions(m: Model, L: string[]): void {
   L.push(`}`);
   L.push("");
 
-  L.push(`function _decode${m.name}(r: SpecReader): ${m.name} {`);
+  L.push(`function decode${m.name}(r: SpecReader): ${m.name} {`);
   L.push(`  const obj: Partial<${m.name}> = {};`);
   L.push(`  r.beginObject();`);
   L.push(`  while (r.hasNextField()) {`);
@@ -157,8 +157,8 @@ export async function $onEmit(context: EmitContext<EmitterOptions>) {
     for (const m of svc.models) {
       if (!m.name) continue;
       L.push(`export const ${m.name}Codec: SpecCodec<${m.name}> = {`);
-      L.push(`  encode(w: SpecWriter, obj: ${m.name}): void { _write${m.name}(w, obj); },`);
-      L.push(`  decode(r: SpecReader): ${m.name} { return _decode${m.name}(r); },`);
+      L.push(`  encode(w: SpecWriter, obj: ${m.name}): void { write${m.name}(w, obj); },`);
+      L.push(`  decode(r: SpecReader): ${m.name} { return decode${m.name}(r); },`);
       L.push(`};`);
       L.push("");
     }
