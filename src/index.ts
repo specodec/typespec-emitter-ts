@@ -49,8 +49,8 @@ function typeToTs(type: any): string {
     return "number";
   if (n === "bytes") return "Uint8Array";
   if (type.kind === "Enum") return "string";
-  if (isArrayType(type)) return `${typeToTs(arrayElementType(type))}[]`;
-  if (isRecordType(type)) return `Record<string, ${typeToTs(recordElementType(type))}>`;
+  if (isArrayType(type)) return `${typeToTs(arrayElementType(type)!)}[]`;
+  if (isRecordType(type)) return `Record<string, ${typeToTs(recordElementType(type)!)}>`;
   if (type.kind === "Model" && type.name) return type.name;
   if (type.kind === "Union" && type.name) return type.name;
   return "unknown";
@@ -68,11 +68,11 @@ function writeExpr(type: any, varExpr: string): string {
   if (n === "float64" || n === "float" || n === "decimal") return `w.writeFloat64(${varExpr})`;
   if (n === "bytes") return `w.writeBytes(${varExpr})`;
   if (isArrayType(type)) {
-    const elem = arrayElementType(type);
+    const elem = arrayElementType(type)!;
     return `(() => { w.beginArray(${varExpr}.length); for (const item of ${varExpr}) { w.nextElement(); ${writeExpr(elem, "item")}; } w.endArray(); })()`;
   }
   if (isRecordType(type)) {
-    const elem = recordElementType(type);
+    const elem = recordElementType(type)!;
     return `(() => { w.beginObject(Object.keys(${varExpr}).length); for (const [key, val] of Object.entries(${varExpr})) { w.writeField(key); ${writeExpr(elem, "val")}; } w.endObject(); })()`;
   }
   if (type.kind === "Model" && type.name) return `write${type.name}(w, ${varExpr})`;
@@ -93,12 +93,12 @@ function readExpr(type: any, optional?: boolean): string {
   if (n === "float64" || n === "float" || n === "decimal") return `r.readFloat64()`;
   if (n === "bytes") return `r.readBytes()`;
   if (isArrayType(type)) {
-    const elem = arrayElementType(type);
+    const elem = arrayElementType(type)!;
     const elemTs = typeToTs(elem);
     return `(() => { const arr: ${elemTs}[] = []; r.beginArray(); while (r.hasNextElement()) { arr.push(${readExpr(elem)}); } r.endArray(); return arr; })()`;
   }
   if (isRecordType(type)) {
-    const elem = recordElementType(type);
+    const elem = recordElementType(type)!;
     const elemTs = typeToTs(elem);
     return `(() => { const record: Record<string, ${elemTs}> = {}; r.beginObject(); while (r.hasNextField()) { const key = r.readFieldName(); record[key] = ${readExpr(elem)}; } r.endObject(); return record; })()`;
   }
@@ -150,7 +150,7 @@ function emitModelFunctions(m: Model, L: string[]): void {
       if (f.optional) {
         L.push(`  let ${fn}: ${typeToTs(f.type)} | undefined;`);
       } else if (isUnionType(f.type)) {
-        const undefCls = `${f.type.name}Undefined`;
+        const undefCls = `${(f.type as any).name}Undefined`;
         L.push(`  let ${fn}: ${typeToTs(f.type)} = new ${undefCls}(SpecUndefined.instance);`);
       } else {
         L.push(`  let ${fn}: ${typeToTs(f.type)} = ${defaultForType(f.type)};`);
@@ -298,8 +298,8 @@ export async function $onEmit(context: EmitContext<EmitterOptions>) {
             xrefFuncs.get(nsSnake)!.add("decode" + t.name);
           }
         }
-        if (isArrayType(t)) collectX(arrayElementType(t));
-        if (isRecordType(t)) collectX(recordElementType(t));
+        if (isArrayType(t)) collectX(arrayElementType(t)!);
+        if (isRecordType(t)) collectX(recordElementType(t)!);
       };
       collectX(f.type);
     }
@@ -329,8 +329,8 @@ export async function $onEmit(context: EmitContext<EmitterOptions>) {
             xrefFuncs.get(nsSnake)!.add("decode" + t.name);
           }
         }
-        if (isArrayType(t)) collectX(arrayElementType(t));
-        if (isRecordType(t)) collectX(recordElementType(t));
+        if (isArrayType(t)) collectX(arrayElementType(t)!);
+        if (isRecordType(t)) collectX(recordElementType(t)!);
       };
       collectX(v.type);
     }
